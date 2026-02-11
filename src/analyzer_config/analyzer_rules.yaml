@@ -1,0 +1,98 @@
+# ===================================
+# 量化投研规则引擎配置文件
+# ===================================
+ma:
+  periods: [5, 10, 20, 60]
+bias:
+  threshold: 5.0
+  optimal_zone: 2.0
+  warning_zone: 3.0
+volume:
+  shrink_threshold: 0.7
+  heavy_threshold: 1.5
+macd:
+  fast: 12
+  slow: 26
+  signal: 9
+rsi:
+  periods: [6, 12, 24]
+  overbought: 70
+  oversold: 30
+  neutral_high: 60
+  neutral_low: 40
+support:
+  tolerance: 2.0
+scoring:
+  trend:
+    weight: 30
+    strong_bull: 30
+    bull: 26
+    weak_bull: 18
+    consolidation: 12
+    weak_bear: 8
+    bear: 4
+    strong_bear: 0
+  bias:
+    weight: 20
+    optimal_below: 20
+    acceptable_below: 16
+    near_above: 18
+    acceptable_above: 14
+    over_threshold: 4
+  volume:
+    weight: 15
+    shrink_down: 15
+    heavy_up: 12
+    normal: 10
+    shrink_up: 6
+    heavy_down: 0
+  support:
+    weight: 10
+    ma5_support: 5
+    ma10_support: 5
+  macd:
+    weight: 15
+    golden_cross_zero: 15
+    golden_cross: 12
+    crossing_up: 10
+    bullish: 8
+    bearish: 2
+    crossing_down: 0
+    death_cross: 0
+  rsi:
+    weight: 10
+    oversold: 10
+    strong_buy: 8
+    neutral: 5
+    weak: 3
+    overbought: 0
+signals:
+  strong_buy: 75
+  buy: 60
+  hold: 45
+  wait: 30
+  sell: 20
+  strong_sell: 10
+risk:
+  max_position_pct: 30
+  max_daily_stop_loss: 5
+  max_single_position: 20
+presets:
+  conservative:
+    bias_threshold: 3.0
+    rsi_overbought: 65
+    rsi_oversold: 35
+    strong_buy_threshold: 80
+    buy_threshold: 70
+  balanced:
+    bias_threshold: 5.0
+    rsi_overbought: 70
+    rsi_oversold: 30
+    strong_buy_threshold: 75
+    buy_threshold: 60
+  aggressive:
+    bias_threshold: 7.0
+    rsi_overbought: 75
+    rsi_oversold: 25
+    strong_buy_threshold: 65
+    buy_threshold: 50
