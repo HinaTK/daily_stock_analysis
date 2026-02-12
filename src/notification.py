@@ -680,6 +680,201 @@ class NotificationService:
                 lines.append(f"- {note}")
             lines.append("")
 
+    @staticmethod
+    def _build_execution_rule(quant: Dict[str, Any]) -> str:
+        """Build execution rule string: trigger/stop/target/add-position."""
+        if not isinstance(quant, dict) or not quant:
+            return "触发: N/A | 止损: N/A | 止盈: N/A | 加仓: N/A"
+
+        signal_valid = bool(quant.get("signal_valid", True))
+        resonance_passed = bool(quant.get("resonance_passed", False))
+        timeframe_alignment = bool(quant.get("timeframe_alignment", False))
+
+        trigger = "回踩关键支撑企稳后执行"
+        if resonance_passed and timeframe_alignment and signal_valid:
+            trigger = "多周期共振+多信号共振通过后，回踩支撑企稳或放量收盘突破执行"
+        elif resonance_passed and signal_valid:
+            trigger = "共振通过后，回踩支撑企稳或放量突破执行"
+        elif not signal_valid:
+            trigger = "信号已衰减，仅观察等待新触发"
+
+        stop_loss = "收盘跌破止损条件立即退出"
+        stop_price = quant.get("stop_loss_price")
+        atr_stop = quant.get("atr_stop_loss")
+        if stop_price not in (None, "N/A"):
+            stop_loss = f"收盘跌破 {stop_price} 或回撤超阈值退出"
+        if atr_stop not in (None, "N/A"):
+            stop_loss = f"收盘跌破止损位或回撤>{atr_stop} 退出"
+
+        take_profit = "到目标位先减仓1/3，其余用MA5/ATR移动止盈"
+        target_price = quant.get("target_price")
+        if target_price not in (None, "N/A"):
+            take_profit = f"到 {target_price} 先减仓1/3，其余移动止盈"
+
+        add_position = "放量收盘确认突破后再加仓"
+        if not resonance_passed:
+            add_position = "不加仓（共振不足）"
+        elif resonance_passed and timeframe_alignment:
+            add_position = "放量收盘突破并回踩不破后加仓"
+
+        return f"触发: {trigger} | 止损: {stop_loss} | 止盈: {take_profit} | 加仓: {add_position}"
+
+    @staticmethod
+    def _build_price_anchors(quant: Dict[str, Any]) -> str:
+        """Price anchors are secondary hints for execution."""
+        if not isinstance(quant, dict) or not quant:
+            return "参考: N/A"
+
+        parts: List[str] = []
+        for key, label in (
+            ("entry_price", "入场"),
+            ("stop_loss_price", "止损"),
+            ("target_price", "目标"),
+        ):
+            val = quant.get(key)
+            if val not in (None, "N/A", ""):
+                parts.append(f"{label}{val}")
+
+        atr_stop = quant.get("atr_stop_loss")
+        if atr_stop not in (None, "N/A", ""):
+            parts.append(f"ATR止损距{atr_stop}")
+
+        hint = []
+        for key in ("boll_position", "kdj_status", "obv_trend"):
+            val = quant.get(key)
+            if val not in (None, "N/A", ""):
+                hint.append(str(val))
+        if hint:
+            parts.append("/".join(hint[:2]))
+
+        if not parts:
+            return "参考: N/A"
+        return "参考: " + " | ".join(parts[:4])
+
+    @staticmethod
+    def _build_exec_tags(quant: Dict[str, Any]) -> str:
+        if not isinstance(quant, dict) or not quant:
+            return ""
+
+        resonance = "共振通过" if quant.get("resonance_passed") else "共振不足"
+        mtf = "多周期是" if quant.get("timeframe_alignment") else "多周期否"
+        decay = "有效" if quant.get("signal_valid", True) else "衰减"
+        return f"{resonance}/{mtf}/{decay}"
+
+    def generate_execution_dashboard(self, results: List[AnalysisResult]) -> str:
+        """Execution-mode daily report: 1-2 screens, rules first, prices second."""
+        report_date = datetime.now().strftime("%Y-%m-%d")
+        sorted_results = sorted(results, key=lambda x: x.sentiment_score, reverse=True)
+
+        buy_count = sum(1 for r in results if getattr(r, "decision_type", "") == "buy")
+        sell_count = sum(
+            1 for r in results if getattr(r, "decision_type", "") == "sell"
+        )
+        hold_count = sum(
+            1 for r in results if getattr(r, "decision_type", "") in ("hold", "")
+        )
+
+        lines: List[str] = [
+            f"## 🎯 {report_date} 执行版清单",
+            "",
+            f"> {len(results)}只 | 🟢买入:{buy_count} 🟡观望:{hold_count} 🔴卖出:{sell_count}",
+            "",
+            "### 📋 Action List",
+            "",
+            "| 信号 | 股票 | 执行规则(主) | 价格锚点(辅) | 仓位 | RR | 标记 |",
+            "|------|------|-------------|-------------|------|----|------|",
+        ]
+
+        for r in sorted_results:
+            signal_text, signal_emoji, _ = self._get_signal_level(r)
+            dashboard = r.dashboard if hasattr(r, "dashboard") and r.dashboard else {}
+            quant = (
+                dashboard.get("quant_plan", {}) if isinstance(dashboard, dict) else {}
+            )
+
+            rule = self._build_execution_rule(quant)
+            anchors = self._build_price_anchors(quant)
+            pos = quant.get("recommended_position_pct", "N/A")
+            rr = quant.get("risk_reward_ratio", "N/A")
+            tags = self._build_exec_tags(quant)
+
+            name = self._escape_md(r.name) if r.name else f"股票{r.code}"
+            lines.append(
+                f"| {signal_emoji}{signal_text} | {name}({r.code}) | {rule} | {anchors} | {pos}% | {rr} | {tags} |"
+            )
+
+        # Keep it short: only expand top-3 buy candidates
+        top = [
+            x for x in sorted_results if x.dashboard and isinstance(x.dashboard, dict)
+        ][:3]
+        if top:
+            lines.extend(["", "### ⭐ Top 3 执行要点", ""])
+            for r in top:
+                signal_text, signal_emoji, _ = self._get_signal_level(r)
+                dashboard = (
+                    r.dashboard if hasattr(r, "dashboard") and r.dashboard else {}
+                )
+                quant = (
+                    dashboard.get("quant_plan", {})
+                    if isinstance(dashboard, dict)
+                    else {}
+                )
+                rule = self._build_execution_rule(quant)
+                lines.append(
+                    f"- {signal_emoji}{signal_text} {self._escape_md(r.name)}({r.code}): {rule}"
+                )
+
+        content = "\n".join(lines)
+        # Hard cap for WeChat/Feishu preview: drop expanded section if too long
+        if len(content) > 3800:
+            content = "\n".join(lines[: (len(lines) - (len(top) + 3))])
+        return content
+
+    def generate_market_review_execution_summary(
+        self, review_report: str, report_filename: str = ""
+    ) -> str:
+        """Compress market review to a short, execution-friendly snippet."""
+        if not review_report:
+            return "🎯 大盘复盘\n\n（无内容）"
+
+        lines = ["🎯 大盘复盘", ""]
+        # Keep only the most actionable numeric lines if present
+        picked = []
+        for raw in review_report.splitlines():
+            text = raw.strip()
+            if not text:
+                continue
+            if any(
+                k in text
+                for k in [
+                    "成交额",
+                    "上涨",
+                    "下跌",
+                    "涨停",
+                    "跌停",
+                    "上证",
+                    "深证",
+                    "创业板",
+                    "沪深300",
+                    "上证50",
+                ]
+            ):
+                picked.append(text)
+            if len(picked) >= 8:
+                break
+
+        if picked:
+            lines.extend(picked)
+        else:
+            lines.append(
+                review_report[:600] + ("..." if len(review_report) > 600 else "")
+            )
+
+        if report_filename:
+            lines.extend(["", f"*完整复盘已保存: {report_filename}*"])
+
+        return "\n".join(lines)
+
     def _get_signal_level(self, result: AnalysisResult) -> tuple:
         """
         Get signal level and color based on operation advice.
@@ -1089,6 +1284,9 @@ class NotificationService:
         Returns:
             精简版决策仪表盘
         """
+        # 执行版：规则为主，价格为辅（保留旧实现作为回退参考）
+        return self.generate_execution_dashboard(results)
+
         report_date = datetime.now().strftime("%Y-%m-%d")
 
         # 按评分排序
