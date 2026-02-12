@@ -41,6 +41,15 @@ try:
 except ImportError:
     pass
 
+# 尝试导入信号证据模块
+generate_signal_evidence = None
+try:
+    from analysis_ext import generate_signal_evidence
+
+    EVIDENCE_AVAILABLE = True
+except ImportError:
+    EVIDENCE_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
 
 
@@ -147,6 +156,26 @@ class TrendAnalysisResult:
     rsi_status: RSIStatus = RSIStatus.NEUTRAL
     rsi_signal: str = ""  # RSI 信号描述
 
+    # ATR 风险指标
+    atr_14: float = 0.0
+    atr_stop_loss: float = 0.0
+
+    # 布林带
+    boll_mid: float = 0.0
+    boll_upper: float = 0.0
+    boll_lower: float = 0.0
+    boll_position: str = "中轨附近"
+
+    # KDJ
+    k_value: float = 0.0
+    d_value: float = 0.0
+    j_value: float = 0.0
+    kdj_status: str = "中性"
+
+    # OBV
+    obv_value: float = 0.0
+    obv_trend: str = "中性"
+
     # 买入信号
     buy_signal: BuySignal = BuySignal.WAIT
     signal_score: int = 0  # 综合评分 0-100
@@ -155,6 +184,33 @@ class TrendAnalysisResult:
 
     # 信号证据（支持 YAML 配置）
     signal_evidence: Optional[Dict[str, Any]] = None
+
+    # 行业/风格标签
+    sector_tags: Optional[Dict[str, Any]] = None
+
+    # 多周期共振
+    timeframe_alignment: bool = False
+    timeframe_notes: List[str] = field(default_factory=list)
+
+    # 资金流向
+    main_fund_net_inflow: float = 0.0
+    main_fund_inflow_ratio: float = 0.0
+    northbound_net_inflow: float = 0.0
+
+    # 多信号共振统计
+    resonance_count: int = 0
+    resonance_passed: bool = False
+
+    # 信号衰减
+    signal_age_days: int = 0
+    signal_valid: bool = True
+
+    # 交易操作清单
+    entry_price: float = 0.0
+    stop_loss_price: float = 0.0
+    target_price: float = 0.0
+    recommended_position_pct: float = 0.0
+    risk_reward_ratio: float = 0.0
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -189,6 +245,34 @@ class TrendAnalysisResult:
             "rsi_24": self.rsi_24,
             "rsi_status": self.rsi_status.value,
             "rsi_signal": self.rsi_signal,
+            "atr_14": self.atr_14,
+            "atr_stop_loss": self.atr_stop_loss,
+            "boll_mid": self.boll_mid,
+            "boll_upper": self.boll_upper,
+            "boll_lower": self.boll_lower,
+            "boll_position": self.boll_position,
+            "k_value": self.k_value,
+            "d_value": self.d_value,
+            "j_value": self.j_value,
+            "kdj_status": self.kdj_status,
+            "obv_value": self.obv_value,
+            "obv_trend": self.obv_trend,
+            "signal_evidence": self.signal_evidence,
+            "sector_tags": self.sector_tags,
+            "timeframe_alignment": self.timeframe_alignment,
+            "timeframe_notes": self.timeframe_notes,
+            "main_fund_net_inflow": self.main_fund_net_inflow,
+            "main_fund_inflow_ratio": self.main_fund_inflow_ratio,
+            "northbound_net_inflow": self.northbound_net_inflow,
+            "resonance_count": self.resonance_count,
+            "resonance_passed": self.resonance_passed,
+            "signal_age_days": self.signal_age_days,
+            "signal_valid": self.signal_valid,
+            "entry_price": self.entry_price,
+            "stop_loss_price": self.stop_loss_price,
+            "target_price": self.target_price,
+            "recommended_position_pct": self.recommended_position_pct,
+            "risk_reward_ratio": self.risk_reward_ratio,
         }
 
 
@@ -227,6 +311,18 @@ class StockTrendAnalyzer:
     RSI_LONG = 24  # 长期RSI周期
     RSI_OVERBOUGHT = 70  # 超买阈值
     RSI_OVERSOLD = 30  # 超卖阈值
+
+    # ATR 风控参数
+    ATR_PERIOD = 14
+    ATR_STOP_MULTIPLIER = 2.0
+    TARGET_PROFIT_MULTIPLIER = 3.0
+
+    # 布林带参数
+    BOLL_PERIOD = 20
+    BOLL_STD = 2.0
+
+    # 信号衰减参数
+    SIGNAL_EXPIRY_DAYS = 5
 
     def __init__(self, style: str = "", use_yaml: Optional[bool] = None):
         """初始化分析器
@@ -308,7 +404,18 @@ class StockTrendAnalyzer:
             )
         return self.MACD_FAST, self.MACD_SLOW, self.MACD_SIGNAL
 
-    def analyze(self, df: pd.DataFrame, code: str) -> TrendAnalysisResult:
+    def _get_risk_limits(self) -> Tuple[float, float]:
+        """获取仓位风控参数 (max_position_pct, max_single_position)"""
+        if self._use_yaml and self._config:
+            return (
+                self._config.risk.max_position_pct,
+                self._config.risk.max_single_position,
+            )
+        return 30.0, 20.0
+
+    def analyze(
+        self, df: pd.DataFrame, code: str, intraday_df: Optional[pd.DataFrame] = None
+    ) -> TrendAnalysisResult:
         """
         分析股票趋势
 
@@ -335,6 +442,10 @@ class StockTrendAnalyzer:
         # 计算 MACD 和 RSI
         df = self._calculate_macd(df)
         df = self._calculate_rsi(df)
+        df = self._calculate_atr(df)
+        df = self._calculate_bollinger(df)
+        df = self._calculate_kdj(df)
+        df = self._calculate_obv(df)
 
         # 获取最新数据
         latest = df.iloc[-1]
@@ -343,6 +454,14 @@ class StockTrendAnalyzer:
         result.ma10 = float(latest["MA10"])
         result.ma20 = float(latest["MA20"])
         result.ma60 = float(latest.get("MA60", 0))
+        result.atr_14 = float(latest.get("ATR_14", 0.0))
+        result.boll_mid = float(latest.get("BOLL_MID", 0.0))
+        result.boll_upper = float(latest.get("BOLL_UPPER", 0.0))
+        result.boll_lower = float(latest.get("BOLL_LOWER", 0.0))
+        result.k_value = float(latest.get("K", 50.0))
+        result.d_value = float(latest.get("D", 50.0))
+        result.j_value = float(latest.get("J", 50.0))
+        result.obv_value = float(latest.get("OBV", 0.0))
 
         # 1. 趋势判断
         self._analyze_trend(df, result)
@@ -358,12 +477,101 @@ class StockTrendAnalyzer:
 
         # 5. MACD 分析
         self._analyze_macd(df, result)
+        self._estimate_signal_age(df, result)
 
         # 6. RSI 分析
         self._analyze_rsi(df, result)
 
-        # 7. 生成买入信号
+        # 7. 布林带分析
+        self._analyze_bollinger(result)
+
+        # 8. KDJ 分析
+        self._analyze_kdj(df, result)
+
+        # 9. OBV 分析
+        self._analyze_obv(df, result)
+
+        # 9. 生成买入信号
         self._generate_signal(result)
+
+        # 9. 多周期共振评估（日线 + 30分钟）
+        self._evaluate_multi_timeframe(result, intraday_df)
+
+        # 9. 资金流向分析
+        self._analyze_main_fund_flow(df, result)
+        self._analyze_northbound_flow(df, result)
+
+        # 10. 多信号共振过滤
+        self._apply_resonance_filter(result)
+
+        # 11. 信号衰减过滤
+        self._apply_signal_decay(result)
+
+        # 12. 生成交易操作清单
+        self._build_trade_plan(result)
+
+        # 12. 生成信号证据（如果可用）
+        if EVIDENCE_AVAILABLE and generate_signal_evidence is not None:
+            try:
+                evidence_summary = generate_signal_evidence(
+                    trend_status=result.trend_status.value,
+                    ma5=result.ma5,
+                    ma10=result.ma10,
+                    ma20=result.ma20,
+                    current_price=result.current_price,
+                    bias_ma5=result.bias_ma5,
+                    volume_status=result.volume_status.value,
+                    volume_ratio_5d=result.volume_ratio_5d,
+                    support_ma5=result.support_ma5,
+                    support_ma10=result.support_ma10,
+                    macd_status=result.macd_status.value,
+                    rsi_status=result.rsi_status.value,
+                )
+                result.signal_evidence = evidence_summary.to_dict()
+            except Exception as e:
+                logger.warning(f"生成信号证据失败: {e}")
+                result.signal_evidence = {"error": str(e)}
+
+        # 13. 添加行业/风格标签
+        self.enrich_with_sector_tags(result)
+
+        return result
+
+    def enrich_with_sector_tags(
+        self, result: TrendAnalysisResult
+    ) -> TrendAnalysisResult:
+        """
+        为分析结果添加行业/风格标签
+
+        尝试从 IndustryTagger 获取标签（如果可用）
+
+        Args:
+            result: 分析结果
+
+        Returns:
+            更新后的分析结果
+        """
+        try:
+            from tags.industry_tagger import IndustryTagger
+
+            tagger = IndustryTagger()
+            tags = tagger.get_stock_tags(result.code)
+            if hasattr(tags, "to_dict"):
+                tags_dict = tags.to_dict()
+            elif isinstance(tags, dict):
+                tags_dict = tags
+            else:
+                tags_dict = {"raw": str(tags)}
+
+            result.sector_tags = tags_dict
+
+            logger.debug(f"为 {result.code} 添加标签: {result.sector_tags}")
+        except ImportError:
+            logger.debug("IndustryTagger 不可用，跳过标签添加")
+            result.sector_tags = {"industry": "未知", "concepts": [], "style": "未分类"}
+        except Exception as e:
+            logger.warning(f"获取标签失败: {e}")
+            result.sector_tags = {"error": str(e)}
 
         return result
 
@@ -392,15 +600,18 @@ class StockTrendAnalyzer:
         """
         df = df.copy()
 
+        # 获取 MACD 配置
+        macd_fast, macd_slow, macd_signal = self._get_macd_config()
+
         # 计算快慢线 EMA
-        ema_fast = df["close"].ewm(span=self.MACD_FAST, adjust=False).mean()
-        ema_slow = df["close"].ewm(span=self.MACD_SLOW, adjust=False).mean()
+        ema_fast = df["close"].ewm(span=macd_fast, adjust=False).mean()
+        ema_slow = df["close"].ewm(span=macd_slow, adjust=False).mean()
 
         # 计算快线 DIF
         df["MACD_DIF"] = ema_fast - ema_slow
 
         # 计算信号线 DEA
-        df["MACD_DEA"] = df["MACD_DIF"].ewm(span=self.MACD_SIGNAL, adjust=False).mean()
+        df["MACD_DEA"] = df["MACD_DIF"].ewm(span=macd_signal, adjust=False).mean()
 
         # 计算柱状图
         df["MACD_BAR"] = (df["MACD_DIF"] - df["MACD_DEA"]) * 2
@@ -417,7 +628,10 @@ class StockTrendAnalyzer:
         """
         df = df.copy()
 
-        for period in [self.RSI_SHORT, self.RSI_MID, self.RSI_LONG]:
+        # 获取 RSI 配置
+        rsi_overbought, rsi_oversold, rsi_periods = self._get_rsi_config()
+
+        for period in rsi_periods:
             # 计算价格变化
             delta = df["close"].diff()
 
@@ -441,6 +655,292 @@ class StockTrendAnalyzer:
             df[col_name] = rsi
 
         return df
+
+    def _calculate_atr(self, df: pd.DataFrame) -> pd.DataFrame:
+        """计算 ATR(14) 指标"""
+        df = df.copy()
+
+        high_low = df["high"] - df["low"]
+        high_prev_close = (df["high"] - df["close"].shift(1)).abs()
+        low_prev_close = (df["low"] - df["close"].shift(1)).abs()
+
+        true_range = pd.concat([high_low, high_prev_close, low_prev_close], axis=1).max(
+            axis=1
+        )
+        df["ATR_14"] = true_range.rolling(window=self.ATR_PERIOD).mean().fillna(0.0)
+        return df
+
+    def _calculate_bollinger(self, df: pd.DataFrame) -> pd.DataFrame:
+        """计算布林带指标"""
+        df = df.copy()
+        mid = df["close"].rolling(window=self.BOLL_PERIOD).mean()
+        std = df["close"].rolling(window=self.BOLL_PERIOD).std()
+
+        df["BOLL_MID"] = mid.fillna(df["close"])
+        df["BOLL_UPPER"] = (mid + self.BOLL_STD * std).fillna(df["close"])
+        df["BOLL_LOWER"] = (mid - self.BOLL_STD * std).fillna(df["close"])
+        return df
+
+    def _calculate_kdj(self, df: pd.DataFrame) -> pd.DataFrame:
+        """计算 KDJ 指标（9,3,3）"""
+        df = df.copy()
+        low_n = df["low"].rolling(window=9, min_periods=1).min()
+        high_n = df["high"].rolling(window=9, min_periods=1).max()
+        rsv = ((df["close"] - low_n) / (high_n - low_n + 1e-9) * 100).fillna(50)
+
+        df["K"] = rsv.ewm(alpha=1 / 3, adjust=False).mean()
+        df["D"] = df["K"].ewm(alpha=1 / 3, adjust=False).mean()
+        df["J"] = 3 * df["K"] - 2 * df["D"]
+        return df
+
+    def _calculate_obv(self, df: pd.DataFrame) -> pd.DataFrame:
+        """计算 OBV 指标。"""
+        df = df.copy()
+        close_diff = df["close"].diff().fillna(0)
+        direction = np.where(close_diff > 0, 1, np.where(close_diff < 0, -1, 0))
+        df["OBV"] = (df["volume"] * direction).cumsum()
+        return df
+
+    def _analyze_bollinger(self, result: TrendAnalysisResult) -> None:
+        """布林带压力/支撑与突破判断"""
+        price = result.current_price
+        if result.boll_upper <= 0 or result.boll_lower <= 0:
+            result.boll_position = "中轨附近"
+            return
+
+        band_width = max(result.boll_upper - result.boll_lower, 1e-6)
+        if price > result.boll_upper:
+            result.boll_position = "上轨突破"
+        elif price >= result.boll_upper - band_width * 0.1:
+            result.boll_position = "上轨压力"
+        elif price < result.boll_lower:
+            result.boll_position = "下轨跌破"
+        elif price <= result.boll_lower + band_width * 0.1:
+            result.boll_position = "下轨支撑"
+        else:
+            result.boll_position = "中轨附近"
+
+    def _analyze_kdj(self, df: pd.DataFrame, result: TrendAnalysisResult) -> None:
+        """KDJ 金叉死叉和超买超卖判断"""
+        if len(df) < 2:
+            result.kdj_status = "中性"
+            return
+
+        prev = df.iloc[-2]
+        curr_k = result.k_value
+        curr_d = result.d_value
+
+        is_golden = (
+            float(prev.get("K", 50)) <= float(prev.get("D", 50)) and curr_k > curr_d
+        )
+        is_death = (
+            float(prev.get("K", 50)) >= float(prev.get("D", 50)) and curr_k < curr_d
+        )
+
+        if is_golden and curr_k < 30:
+            result.kdj_status = "低位金叉"
+        elif is_golden:
+            result.kdj_status = "金叉"
+        elif is_death and curr_k > 70:
+            result.kdj_status = "高位死叉"
+        elif is_death:
+            result.kdj_status = "死叉"
+        elif curr_k > 80 and curr_d > 80:
+            result.kdj_status = "超买"
+        elif curr_k < 20 and curr_d < 20:
+            result.kdj_status = "超卖"
+        else:
+            result.kdj_status = "中性"
+
+    def _analyze_obv(self, df: pd.DataFrame, result: TrendAnalysisResult) -> None:
+        """OBV 趋势与价格关系。"""
+        if len(df) < 6:
+            result.obv_trend = "中性"
+            return
+
+        obv_now = float(df["OBV"].iloc[-1])
+        obv_prev = float(df["OBV"].iloc[-6])
+        price_now = float(df["close"].iloc[-1])
+        price_prev = float(df["close"].iloc[-6])
+
+        obv_up = obv_now > obv_prev
+        price_up = price_now > price_prev
+
+        if obv_up and price_up:
+            result.obv_trend = "量价齐升"
+        elif obv_up and not price_up:
+            result.obv_trend = "量增价弱(潜在背离)"
+        elif not obv_up and price_up:
+            result.obv_trend = "价升量弱(顶部风险)"
+        else:
+            result.obv_trend = "量价齐弱"
+
+    def _build_trade_plan(self, result: TrendAnalysisResult) -> None:
+        """构建交易操作清单：买入/止损/目标/仓位/盈亏比"""
+        result.entry_price = result.current_price
+
+        atr_value = max(result.atr_14, 0.0)
+        stop_distance = atr_value * self.ATR_STOP_MULTIPLIER
+        target_distance = atr_value * self.TARGET_PROFIT_MULTIPLIER
+
+        if stop_distance <= 0:
+            stop_distance = result.current_price * 0.03
+        if target_distance <= 0:
+            target_distance = result.current_price * 0.06
+
+        result.stop_loss_price = max(0.0, result.current_price - stop_distance)
+        result.target_price = result.current_price + target_distance
+        result.atr_stop_loss = stop_distance
+
+        max_position_pct, max_single_position = self._get_risk_limits()
+        signal_based_position = min(float(result.signal_score) / 4.0, 25.0)
+        result.recommended_position_pct = min(
+            signal_based_position, max_position_pct, max_single_position
+        )
+
+        loss = max(result.entry_price - result.stop_loss_price, 0.01)
+        gain = max(result.target_price - result.entry_price, 0.0)
+        result.risk_reward_ratio = round(gain / loss, 2)
+
+    def _evaluate_multi_timeframe(
+        self, result: TrendAnalysisResult, intraday_df: Optional[pd.DataFrame]
+    ) -> None:
+        """评估日线与30分钟级别是否共振。"""
+        if intraday_df is None or intraday_df.empty or len(intraday_df) < 20:
+            result.timeframe_alignment = False
+            result.timeframe_notes.append("无30分钟数据，未进行多周期共振验证")
+            return
+
+        data = intraday_df.sort_values("date").reset_index(drop=True).copy()
+        data["MA5"] = data["close"].rolling(window=5).mean()
+        data["MA10"] = data["close"].rolling(window=10).mean()
+        data["MA20"] = data["close"].rolling(window=20).mean()
+        latest = data.iloc[-1]
+
+        intraday_bull = (
+            float(latest["MA5"]) > float(latest["MA10"]) > float(latest["MA20"])
+        )
+        daily_bull = result.trend_status in [TrendStatus.STRONG_BULL, TrendStatus.BULL]
+
+        result.timeframe_alignment = intraday_bull and daily_bull
+        if result.timeframe_alignment:
+            result.timeframe_notes.append("日线与30分钟级别同向多头，共振成立")
+            result.signal_reasons.append("✅ 多周期共振（日线+30分钟）")
+            result.signal_score = min(100, result.signal_score + 5)
+        else:
+            result.timeframe_notes.append("多周期未共振，短线方向与日线不一致")
+            result.risk_factors.append("⚠️ 多周期未共振，降低仓位")
+
+    def _analyze_main_fund_flow(
+        self, df: pd.DataFrame, result: TrendAnalysisResult
+    ) -> None:
+        """主力资金流向：支持多种列名自动识别。"""
+        flow_candidates = [
+            "main_fund_net_inflow",
+            "main_net_inflow",
+            "主力净流入",
+            "主力净额",
+        ]
+        ratio_candidates = [
+            "main_fund_inflow_ratio",
+            "main_inflow_ratio",
+            "主力净占比",
+            "主力净流入占比",
+        ]
+
+        flow_col = next((c for c in flow_candidates if c in df.columns), None)
+        ratio_col = next((c for c in ratio_candidates if c in df.columns), None)
+
+        if flow_col is not None:
+            result.main_fund_net_inflow = float(df[flow_col].iloc[-1])
+        if ratio_col is not None:
+            result.main_fund_inflow_ratio = float(df[ratio_col].iloc[-1])
+
+        if flow_col is not None and result.main_fund_net_inflow > 0:
+            result.signal_reasons.append("✅ 主力资金净流入")
+        elif flow_col is not None and result.main_fund_net_inflow < 0:
+            result.risk_factors.append("⚠️ 主力资金净流出")
+
+    def _analyze_northbound_flow(
+        self, df: pd.DataFrame, result: TrendAnalysisResult
+    ) -> None:
+        """北向资金追踪：支持多种列名自动识别。"""
+        candidates = [
+            "northbound_net_inflow",
+            "northbound_net",
+            "北向净流入",
+            "北向资金净买额",
+        ]
+        col = next((c for c in candidates if c in df.columns), None)
+        if col is None:
+            return
+
+        result.northbound_net_inflow = float(df[col].iloc[-1])
+        if result.northbound_net_inflow > 0:
+            result.signal_reasons.append("✅ 北向资金净流入")
+        elif result.northbound_net_inflow < 0:
+            result.risk_factors.append("⚠️ 北向资金净流出")
+
+    def _apply_resonance_filter(self, result: TrendAnalysisResult) -> None:
+        """多信号共振过滤：至少 3 个独立信号同向。"""
+        signals = [
+            result.trend_status in [TrendStatus.STRONG_BULL, TrendStatus.BULL],
+            result.volume_status
+            in [VolumeStatus.SHRINK_VOLUME_DOWN, VolumeStatus.HEAVY_VOLUME_UP],
+            result.macd_status
+            in [
+                MACDStatus.GOLDEN_CROSS_ZERO,
+                MACDStatus.GOLDEN_CROSS,
+                MACDStatus.BULLISH,
+            ],
+            result.rsi_status
+            in [RSIStatus.STRONG_BUY, RSIStatus.NEUTRAL, RSIStatus.OVERSOLD],
+            result.timeframe_alignment,
+            result.main_fund_net_inflow > 0,
+            result.northbound_net_inflow > 0,
+        ]
+        count = sum(1 for x in signals if x)
+        result.resonance_count = count
+        result.resonance_passed = count >= 3
+
+        if not result.resonance_passed:
+            result.risk_factors.append(f"⚠️ 多信号共振不足（{count}/3）")
+            if result.buy_signal == BuySignal.STRONG_BUY:
+                result.buy_signal = BuySignal.BUY
+            elif result.buy_signal == BuySignal.BUY:
+                result.buy_signal = BuySignal.HOLD
+
+    def _estimate_signal_age(
+        self, df: pd.DataFrame, result: TrendAnalysisResult
+    ) -> None:
+        """估算最近一次 MACD 金叉距今天数。"""
+        if len(df) < 2 or "MACD_DIF" not in df.columns or "MACD_DEA" not in df.columns:
+            result.signal_age_days = 999
+            return
+
+        cross = (df["MACD_DIF"].shift(1) <= df["MACD_DEA"].shift(1)) & (
+            df["MACD_DIF"] > df["MACD_DEA"]
+        )
+        cross_idx = np.where(cross.fillna(False))[0]
+        if len(cross_idx) == 0:
+            result.signal_age_days = 999
+            return
+
+        result.signal_age_days = int(len(df) - 1 - cross_idx[-1])
+
+    def _apply_signal_decay(self, result: TrendAnalysisResult) -> None:
+        """信号衰减：金叉后超过 N 天，买入信号降级。"""
+        result.signal_valid = result.signal_age_days <= self.SIGNAL_EXPIRY_DAYS
+        if result.signal_valid:
+            return
+
+        result.risk_factors.append(
+            f"⚠️ 信号已衰减（距最近金叉 {result.signal_age_days} 天，超过 {self.SIGNAL_EXPIRY_DAYS} 天）"
+        )
+        if result.buy_signal == BuySignal.STRONG_BUY:
+            result.buy_signal = BuySignal.BUY
+        elif result.buy_signal == BuySignal.BUY:
+            result.buy_signal = BuySignal.HOLD
 
     def _analyze_trend(self, df: pd.DataFrame, result: TrendAnalysisResult) -> None:
         """
@@ -539,15 +1039,19 @@ class StockTrendAnalyzer:
         prev_close = df.iloc[-2]["close"]
         price_change = (latest["close"] - prev_close) / prev_close * 100
 
+        # 获取量能配置
+        volume_heavy = self._get_volume_heavy_ratio()
+        volume_shrink = self._get_volume_shrink_ratio()
+
         # 量能状态判断
-        if result.volume_ratio_5d >= self.VOLUME_HEAVY_RATIO:
+        if result.volume_ratio_5d >= volume_heavy:
             if price_change > 0:
                 result.volume_status = VolumeStatus.HEAVY_VOLUME_UP
                 result.volume_trend = "放量上涨，多头力量强劲"
             else:
                 result.volume_status = VolumeStatus.HEAVY_VOLUME_DOWN
                 result.volume_trend = "放量下跌，注意风险"
-        elif result.volume_ratio_5d <= self.VOLUME_SHRINK_RATIO:
+        elif result.volume_ratio_5d <= volume_shrink:
             if price_change > 0:
                 result.volume_status = VolumeStatus.SHRINK_VOLUME_UP
                 result.volume_trend = "缩量上涨，上攻动能不足"
@@ -665,22 +1169,30 @@ class StockTrendAnalyzer:
         - RSI < 30：超卖，关注反弹
         - 40-60：中性区域
         """
-        if len(df) < self.RSI_LONG:
+        # 获取 RSI 配置
+        rsi_overbought, rsi_oversold, rsi_periods = self._get_rsi_config()
+        rsi_long = rsi_periods[-1] if rsi_periods else 24
+
+        if len(df) < rsi_long:
             result.rsi_signal = "数据不足"
             return
 
         latest = df.iloc[-1]
 
-        # 获取 RSI 数据
-        result.rsi_6 = float(latest[f"RSI_{self.RSI_SHORT}"])
-        result.rsi_12 = float(latest[f"RSI_{self.RSI_MID}"])
-        result.rsi_24 = float(latest[f"RSI_{self.RSI_LONG}"])
+        # 获取 RSI 数据 - 使用配置的周期
+        rsi_6 = rsi_periods[0] if len(rsi_periods) > 0 else 6
+        rsi_12 = rsi_periods[1] if len(rsi_periods) > 1 else 12
+        rsi_24 = rsi_periods[2] if len(rsi_periods) > 2 else 24
 
-        # 以中期 RSI(12) 为主进行判断
+        result.rsi_6 = float(latest[f"RSI_{rsi_6}"])
+        result.rsi_12 = float(latest[f"RSI_{rsi_12}"])
+        result.rsi_24 = float(latest[f"RSI_{rsi_24}"])
+
+        # 以中期 RSI 为主进行判断
         rsi_mid = result.rsi_12
 
         # 判断 RSI 状态
-        if rsi_mid > self.RSI_OVERBOUGHT:
+        if rsi_mid > rsi_overbought:
             result.rsi_status = RSIStatus.OVERBOUGHT
             result.rsi_signal = f"⚠️ RSI超买({rsi_mid:.1f}>70)，短期回调风险高"
         elif rsi_mid > 60:
@@ -689,7 +1201,7 @@ class StockTrendAnalyzer:
         elif rsi_mid >= 40:
             result.rsi_status = RSIStatus.NEUTRAL
             result.rsi_signal = f" RSI中性({rsi_mid:.1f})，震荡整理中"
-        elif rsi_mid >= self.RSI_OVERSOLD:
+        elif rsi_mid >= rsi_oversold:
             result.rsi_status = RSIStatus.WEAK
             result.rsi_signal = f"⚡ RSI弱势({rsi_mid:.1f})，关注反弹"
         else:
@@ -746,12 +1258,17 @@ class StockTrendAnalyzer:
         elif bias < 2:
             score += 18
             reasons.append(f"✅ 价格贴近MA5({bias:.1f}%)，介入好时机")
-        elif bias < self.BIAS_THRESHOLD:
-            score += 14
-            reasons.append(f"⚡ 价格略高于MA5({bias:.1f}%)，可小仓介入")
         else:
-            score += 4
-            risks.append(f"❌ 乖离率过高({bias:.1f}%>5%)，严禁追高！")
+            # 获取乖离率阈值
+            bias_threshold = self._get_bias_threshold()
+            if bias < bias_threshold:
+                score += 14
+                reasons.append(f"⚡ 价格略高于MA5({bias:.1f}%)，可小仓介入")
+            else:
+                score += 4
+                risks.append(
+                    f"❌ 乖离率过高({bias:.1f}%>{bias_threshold}%)，严禁追高！"
+                )
 
         # === 量能评分（15分）===
         volume_scores = {
@@ -818,6 +1335,28 @@ class StockTrendAnalyzer:
         else:
             reasons.append(result.rsi_signal)
 
+        # === 布林带辅助判断（不直接计分）===
+        if result.boll_position == "下轨支撑":
+            reasons.append("✅ 布林下轨附近获支撑，关注反弹")
+        elif result.boll_position == "上轨突破":
+            reasons.append("⚡ 布林上轨突破，动量增强")
+        elif result.boll_position == "上轨压力":
+            risks.append("⚠️ 接近布林上轨压力，谨防冲高回落")
+        elif result.boll_position == "下轨跌破":
+            risks.append("⚠️ 跌破布林下轨，短线偏弱")
+
+        # === KDJ 辅助判断（不直接计分）===
+        if result.kdj_status in ["低位金叉", "金叉", "超卖"]:
+            reasons.append(f"✅ KDJ: {result.kdj_status}")
+        elif result.kdj_status in ["高位死叉", "死叉", "超买"]:
+            risks.append(f"⚠️ KDJ: {result.kdj_status}")
+
+        # === OBV 辅助判断（不直接计分）===
+        if result.obv_trend in ["量价齐升", "量增价弱(潜在背离)"]:
+            reasons.append(f"✅ OBV: {result.obv_trend}")
+        elif result.obv_trend in ["价升量弱(顶部风险)", "量价齐弱"]:
+            risks.append(f"⚠️ OBV: {result.obv_trend}")
+
         # === 综合判断 ===
         result.signal_score = score
         result.signal_reasons = reasons
@@ -870,6 +1409,9 @@ class StockTrendAnalyzer:
             f"📊 量能分析: {result.volume_status.value}",
             f"   量比(vs5日): {result.volume_ratio_5d:.2f}",
             f"   量能趋势: {result.volume_trend}",
+            f"   主力净流入: {result.main_fund_net_inflow:.2f}",
+            f"   主力净占比: {result.main_fund_inflow_ratio:.2f}%",
+            f"   北向净流入: {result.northbound_net_inflow:.2f}",
             f"",
             f"📈 MACD指标: {result.macd_status.value}",
             f"   DIF: {result.macd_dif:.4f}",
@@ -877,15 +1419,49 @@ class StockTrendAnalyzer:
             f"   MACD: {result.macd_bar:.4f}",
             f"   信号: {result.macd_signal}",
             f"",
+            f"📉 布林带:",
+            f"   上轨: {result.boll_upper:.2f}",
+            f"   中轨: {result.boll_mid:.2f}",
+            f"   下轨: {result.boll_lower:.2f}",
+            f"   位置: {result.boll_position}",
+            f"",
             f"📊 RSI指标: {result.rsi_status.value}",
             f"   RSI(6): {result.rsi_6:.1f}",
             f"   RSI(12): {result.rsi_12:.1f}",
             f"   RSI(24): {result.rsi_24:.1f}",
             f"   信号: {result.rsi_signal}",
             f"",
+            f"📈 KDJ指标:",
+            f"   K: {result.k_value:.1f}",
+            f"   D: {result.d_value:.1f}",
+            f"   J: {result.j_value:.1f}",
+            f"   状态: {result.kdj_status}",
+            f"",
+            f"📊 OBV指标:",
+            f"   OBV: {result.obv_value:.0f}",
+            f"   趋势: {result.obv_trend}",
+            f"",
+            f"🛡️ ATR风控:",
+            f"   ATR(14): {result.atr_14:.4f}",
+            f"   ATR止损距离: {result.atr_stop_loss:.4f}",
+            f"",
             f"🎯 操作建议: {result.buy_signal.value}",
             f"   综合评分: {result.signal_score}/100",
+            f"   买入价: {result.entry_price:.2f}",
+            f"   止损价: {result.stop_loss_price:.2f}",
+            f"   目标价: {result.target_price:.2f}",
+            f"   建议仓位: {result.recommended_position_pct:.1f}%",
+            f"   风险收益比: 1:{result.risk_reward_ratio:.2f}",
+            f"   多周期共振: {'是' if result.timeframe_alignment else '否'}",
+            f"   多信号共振: {'通过' if result.resonance_passed else '未通过'} ({result.resonance_count}项)",
+            f"   信号衰减: {'有效' if result.signal_valid else '失效'} (信号龄期{result.signal_age_days}天)",
         ]
+
+        if result.timeframe_notes:
+            lines.append("")
+            lines.append("🧭 多周期评估:")
+            for note in result.timeframe_notes:
+                lines.append(f"   {note}")
 
         if result.signal_reasons:
             lines.append(f"")

@@ -88,7 +88,7 @@ class EvidenceSummary:
             "total_score": self.total_score,
             "evidence_count": len(self.evidence_list),
             "triggered_count": self.triggered_count,
-            "invalid_count": self.invalidation_count,
+            "invalid_count": self.invalid_count,
             "risk_count": self.risk_count,
             "evidence": [e.to_dict() for e in self.evidence_list],
         }
@@ -331,7 +331,7 @@ def generate_signal_evidence(
         SignalEvidence(
             rule_name="volume_status",
             rule_type=EvidenceType.VOLUME,
-            triggered=vol_status in ["缩量回调", "放量上涨"],
+            triggered=volume_status in ["缩量回调", "放量上涨"],
             condition=volume_status,
             actual_value=f"量比={volume_ratio_5d:.2f}",
             threshold="缩量回调/放量上涨",
@@ -416,7 +416,7 @@ def format_evidence_table(evidence_summary: EvidenceSummary) -> str:
         [
             "",
             f"**总分**: {evidence_summary.total_score} / 100",
-            f"**触发**: {evidence_summary.triggered_count} | **失效**: {evidence_summary.invalidation_count} | **风险**: {evidence_summary.risk_count}",
+            f"**触发**: {evidence_summary.triggered_count} | **失效**: {evidence_summary.invalid_count} | **风险**: {evidence_summary.risk_count}",
         ]
     )
 
