@@ -775,22 +775,64 @@ class NotificationService:
         )
 
         lines: List[str] = [
-            f"## 🎯 {report_date} 执行版清单",
+            f"🎯 {report_date} 执行版清单",
+            f"{len(results)}只 | 🟢买入:{buy_count} 🟡观望:{hold_count} 🔴卖出:{sell_count}",
             "",
-            f"> {len(results)}只 | 🟢买入:{buy_count} 🟡观望:{hold_count} 🔴卖出:{sell_count}",
+            "📋 Action List",
             "",
-            "### 📋 Action List",
-            "",
-            "| 信号 | 股票 | 执行规则(主) | 价格锚点(辅) | 仓位 | RR | 标记 |",
-            "|------|------|-------------|-------------|------|----|------|",
         ]
+
+        def build_fallback_quant(
+            dashboard: Dict[str, Any], r: AnalysisResult
+        ) -> Dict[str, Any]:
+            battle = (
+                dashboard.get("battle_plan", {}) if isinstance(dashboard, dict) else {}
+            )
+            sniper = battle.get("sniper_points", {}) if isinstance(battle, dict) else {}
+            pos = (
+                battle.get("position_strategy", {}) if isinstance(battle, dict) else {}
+            )
+            core = (
+                dashboard.get("core_conclusion", {})
+                if isinstance(dashboard, dict)
+                else {}
+            )
+
+            quant: Dict[str, Any] = {
+                "buy_signal": getattr(r, "operation_advice", "N/A"),
+                "signal_score": getattr(r, "sentiment_score", "N/A"),
+                "signal_valid": True,
+                "resonance_passed": False,
+                "timeframe_alignment": False,
+                "signal_age_days": "N/A",
+                "timeframe_notes": [],
+            }
+
+            if isinstance(sniper, dict):
+                quant["entry_price"] = self._clean_sniper_value(
+                    sniper.get("ideal_buy", "N/A")
+                )
+                quant["stop_loss_price"] = self._clean_sniper_value(
+                    sniper.get("stop_loss", "N/A")
+                )
+                quant["target_price"] = self._clean_sniper_value(
+                    sniper.get("take_profit", "N/A")
+                )
+
+            if isinstance(pos, dict):
+                quant["recommended_position_pct"] = pos.get("suggested_position", "N/A")
+
+            if isinstance(core, dict) and core.get("one_sentence"):
+                quant["_one_sentence"] = core.get("one_sentence")
+
+            return quant
 
         for r in sorted_results:
             signal_text, signal_emoji, _ = self._get_signal_level(r)
             dashboard = r.dashboard if hasattr(r, "dashboard") and r.dashboard else {}
-            quant = (
-                dashboard.get("quant_plan", {}) if isinstance(dashboard, dict) else {}
-            )
+            quant = dashboard.get("quant_plan") if isinstance(dashboard, dict) else None
+            if not isinstance(quant, dict) or not quant:
+                quant = build_fallback_quant(dashboard, r)
 
             rule = self._build_execution_rule(quant)
             anchors = self._build_price_anchors(quant)
@@ -799,35 +841,15 @@ class NotificationService:
             tags = self._build_exec_tags(quant)
 
             name = self._escape_md(r.name) if r.name else f"股票{r.code}"
-            lines.append(
-                f"| {signal_emoji}{signal_text} | {name}({r.code}) | {rule} | {anchors} | {pos}% | {rr} | {tags} |"
-            )
-
-        # Keep it short: only expand top-3 buy candidates
-        top = [
-            x for x in sorted_results if x.dashboard and isinstance(x.dashboard, dict)
-        ][:3]
-        if top:
-            lines.extend(["", "### ⭐ Top 3 执行要点", ""])
-            for r in top:
-                signal_text, signal_emoji, _ = self._get_signal_level(r)
-                dashboard = (
-                    r.dashboard if hasattr(r, "dashboard") and r.dashboard else {}
-                )
-                quant = (
-                    dashboard.get("quant_plan", {})
-                    if isinstance(dashboard, dict)
-                    else {}
-                )
-                rule = self._build_execution_rule(quant)
-                lines.append(
-                    f"- {signal_emoji}{signal_text} {self._escape_md(r.name)}({r.code}): {rule}"
-                )
+            lines.append(f"{signal_emoji}{signal_text} {name}({r.code})")
+            lines.append(f"执行: {rule}")
+            lines.append(f"参考: {anchors} | 仓位: {pos}% | RR: 1:{rr} | 标记: {tags}")
+            lines.append("")
 
         content = "\n".join(lines)
-        # Hard cap for WeChat/Feishu preview: drop expanded section if too long
+        # Hard cap for WeChat/Feishu preview
         if len(content) > 3800:
-            content = "\n".join(lines[: (len(lines) - (len(top) + 3))])
+            content = content[:3800]
         return content
 
     def generate_market_review_execution_summary(

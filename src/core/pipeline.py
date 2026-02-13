@@ -14,7 +14,7 @@ A股自选股智能分析系统 - 核心分析流水线
 import logging
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import date
+from datetime import date, timedelta
 from typing import List, Dict, Any, Optional, Tuple
 
 import pandas as pd
@@ -222,21 +222,20 @@ class StockAnalysisPipeline:
             intraday_df: Optional[pd.DataFrame] = None
             try:
                 intraday_df = self._fetch_intraday_30m(code)
-                # 获取历史数据进行趋势分析
-                context = self.db.get_analysis_context(code)
-                if context and "raw_data" in context:
-                    raw_data = context["raw_data"]
-                    if isinstance(raw_data, list) and len(raw_data) > 0:
-                        df = pd.DataFrame(raw_data)
-                        if intraday_df is None:
-                            intraday_df = self._extract_intraday_df(context)
-                        trend_result = self.trend_analyzer.analyze(
-                            df, code, intraday_df=intraday_df
-                        )
-                        logger.info(
-                            f"[{code}] 趋势分析: {trend_result.trend_status.value}, "
-                            f"买入信号={trend_result.buy_signal.value}, 评分={trend_result.signal_score}"
-                        )
+                df = self._get_trend_daily_df(code, days=120)
+                if df is not None and not df.empty:
+                    # 兼容：若上下文里带有分时数据则复用
+                    context = self.db.get_analysis_context(code)
+                    if intraday_df is None and context:
+                        intraday_df = self._extract_intraday_df(context)
+
+                    trend_result = self.trend_analyzer.analyze(
+                        df, code, intraday_df=intraday_df
+                    )
+                    logger.info(
+                        f"[{code}] 趋势分析: {trend_result.trend_status.value}, "
+                        f"买入信号={trend_result.buy_signal.value}, 评分={trend_result.signal_score}"
+                    )
             except Exception as e:
                 logger.warning(f"[{code}] 趋势分析失败: {e}")
 
@@ -462,6 +461,26 @@ class StockAnalysisPipeline:
                 except Exception:
                     continue
         return None
+
+    def _get_trend_daily_df(self, code: str, days: int = 120) -> Optional[pd.DataFrame]:
+        """从数据库读取日线历史用于趋势分析。"""
+        try:
+            end_date = date.today()
+            start_date = end_date - timedelta(days=days)
+            rows = self.db.get_data_range(
+                code, start_date=start_date, end_date=end_date
+            )
+            if not rows:
+                return None
+            data = [r.to_dict() for r in rows]
+            df = pd.DataFrame(data)
+            # 标准化列名为 trend_analyzer 使用的 close/open/high/low/volume/date
+            if "date" in df.columns:
+                return df
+            return df
+        except Exception as e:
+            logger.debug(f"[{code}] 读取趋势日线数据失败: {e}")
+            return None
 
     def _fetch_intraday_30m(self, code: str) -> Optional[pd.DataFrame]:
         """尝试从 DataFetcherManager 获取 30 分钟级别数据（能力可选）。"""
